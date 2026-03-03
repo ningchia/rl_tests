@@ -1,5 +1,6 @@
 # 需要 pip install torch, gymnasium[toy-text] 和 numpy. 
 
+import os
 import gymnasium as gym
 import torch
 import torch.nn as nn
@@ -54,6 +55,13 @@ EPISODES = 500          # 玩幾局，每一局都是從環境的初始狀態開
 ACTS_PER_EPISODE = 200  # 每局最多執行多少個動作，這是為了防止某些情況下遊戲無法結束而導致訓練無限進行下去。
 
 USE_DDQN = True         # 是否使用 Double DQN 來減少 DQN 的過度估計問題。Double DQN 通過分離動作選擇和動作評估來提供更穩定的學習目標。
+
+MODEL_SAVE_PATH = "dqn_model"
+CHECKPOINT_FILE = "best_cartpole_model.pth"
+
+os.makedirs(MODEL_SAVE_PATH, exist_ok=True)
+checkpoint_path = os.path.join(MODEL_SAVE_PATH, CHECKPOINT_FILE)
+best_reward = 0  # 紀錄歷史最高分
 
 # 3. 初始化環境與模型
 env = gym.make("CartPole-v1")
@@ -194,6 +202,13 @@ for episode in range(EPISODES):
             
         if done: break
     
+    # 在每一局結束後，判斷是否需要儲存模型
+    if total_reward >= best_reward:
+        best_reward = total_reward
+        # 儲存目前的最佳模型權重
+        torch.save(policy_net.state_dict(), checkpoint_path)
+        print(f"--- 發現更優模型！得分: {total_reward}，已儲存權重 ---")
+
     # 每 TARGET_UPDATE (10) 個 Episode 同步一次目標網路
     if episode % TARGET_UPDATE == 0:
         target_net.load_state_dict(policy_net.state_dict())
