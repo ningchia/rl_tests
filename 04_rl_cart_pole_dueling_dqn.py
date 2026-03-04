@@ -24,6 +24,7 @@ import datetime
 current_time = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
 writer = SummaryWriter(f'runs/DQN_CartPole_{current_time}')
 
+"""
 # 1. 定義類神經網路 (大腦), 用來預測某一個observation/state下每個action的Q值 (價值)
 #    所以 input tensor 是 state_dim (4個觀察值, 位置、速度、角度、角速度)，output是action_dim (2個動作, 左右)，
 #    中間有兩層隱藏層，每層64個神經元，激活函數是ReLU。
@@ -40,7 +41,77 @@ class DQN(nn.Module):
     
     def forward(self, x):
         return self.net(x)
+"""
 
+# Dueling (決鬥) vs. DQN 
+#
+# 相較傳統的 DQN 網路直接輸出每個動作的 Q 值, Dueling DQN 會將網路的最後幾層拆成兩條並行的「支流」：
+#
+#   狀態價值支流 (State Value Stream, V(s))：評估當前「處於這個狀態」本身有多好，與動作無關。
+#     例如：在 CartPole 中，桿子直立在中央是非常好的狀態。
+#
+#   動作優勢支流 (Advantage Stream, A(s, a))：評估在當前狀態下，採取「特定動作」相對於其他動作能帶來多少額外的價值。
+#     例如：桿子向左傾斜時，向左移動的優勢會比向右移動高得多。
+#
+# 最後，這兩者會合併輸出最終的 Q 值：Q(s, a) = V(s) + A(s, a)。
+#
+# Dueling 架構解決了一個核心問題：「在很多狀態下，你做什麼動作其實不重要。」
+# 傳統 DQN 的缺點：如果一個狀態下有 10 個動作，DQN 必須把 10 個動作都「玩過」幾遍，才能更新對這個"狀態"價值的認知。
+# Dueling 的優點：
+#   學習更高效：它可以在不關心具體動作的情況下，先學會辨識哪些「狀態」是好的。
+#   容錯率高：即使某個動作沒被選中過，透過學習 V(s)，模型也能對該狀態下的所有動作價值有一個基礎的了解。
+#   處理冗餘動作：在一些環境中（例如開車），只要車子在正軌上，稍微偏左或偏右一點點其實沒差別。Dueling 能更敏銳地捕捉這種特性。
+
+# --- 修改成 Dueling DQN 的網路架構 ---
+class DuelingDQN(nn.Module):
+    def __init__(self, state_dim, action_dim):
+        super(DuelingDQN, self).__init__()
+        # 共享特徵提取層
+        self.feature_layer = nn.Sequential(
+            nn.Linear(state_dim, 64),
+            nn.ReLU()
+        )
+        
+        # 狀態價值流 (Value Stream) - 輸出該狀態的基礎分數 (V)
+        self.value_stream = nn.Sequential(
+            nn.Linear(64, 64),
+            nn.ReLU(),
+            nn.Linear(64, 1)
+        )
+        
+        # 動作優勢流 (Advantage Stream) - 輸出每個動作的相對優勢 (A)
+        self.advantage_stream = nn.Sequential(
+            nn.Linear(64, 64),
+            nn.ReLU(),
+            nn.Linear(64, action_dim)
+        )
+    
+    def forward(self, x):
+        # 確保輸入至少是 2D (batch_size, state_dim)
+        # 如果 x 只有 1 維，會自動補成 (1, state_dim)，這樣就可以同時處理單筆和多筆輸入了。
+        # 什麼時候 state 會是 1 維的？在訓練過程中，我們是一次訓練多筆經驗 (batch)，所以輸入通常是 2 維的 (batch_size, state_dim)。
+        # 但是在評估過程中，我們可能會直接輸入單一的狀態 (state)，這時它就是 1 維的 (state_dim,)，需要補成 (1, state_dim) 才能通過網路。
+        # 特別是之後在使用policy_net來預測"當前狀態下"每個動作的Q值然後選擇Q值最高的動作, 或是在執行測試時。
+        # ex. 之後會執行到 action = policy_net(state).argmax().item()
+        if x.dim() == 1:
+            x = x.unsqueeze(0)
+
+        # 為什麼原本的 02_rl_cart_pole.py 沒有補維度也沒事?
+        # 因為在 02_rl_cart_pole.py 中，使用的是 nn.Sequential 直接輸出。
+        # 對於 (4,) 的輸入，它會輸出 (2,)。執行到 action = policy_net(state).argmax().item()時, .argmax() 在一維向量上執行沒有問題。
+        # 在 Dueling DQN 這裡不這樣會出問題的原因是, 因為我們在 forward 裡面寫了 advantage.mean(dim=1)。
+        # 這個「指定維度求平均」的操作，本身就強制要求輸入必須具備 Batch 維度。
+
+        features = self.feature_layer(x)            # 形狀為 (batch, 64)
+        value = self.value_stream(features)         # 形狀為 (batch, 1)，代表每個狀態的基礎價值 V(s)
+        advantage = self.advantage_stream(features) # 形狀為 (batch, action_dim)，代表每個動作的相對優勢 A(s,a)
+        
+        # 結合公式: Q(s,a) = V(s) + (A(s,a) - Mean(A(s,a)))
+        # 減去平均值可以增加訓練的穩定性與模型識別度
+        # q_values 的形狀為 (batch, action_dim)，代表每個狀態下每個動作的 Q 值。
+        q_values = value + (advantage - advantage.mean(dim=1, keepdim=True))    # 在 action_dim 上求平均，保持維度以便相減
+        return q_values
+    
 # 2. 超參數設定
 BATCH_SIZE = 64
 GAMMA = 0.99            # 折扣因子 (gamma)，用來平衡當前獎勵和未來獎勵的重要性。接近1表示未來獎勵幾乎和當前獎勵一樣重要，接近0表示只關心當前獎勵。
@@ -57,7 +128,7 @@ ACTS_PER_EPISODE = 200  # 每局最多執行多少個動作，這是為了防止
 USE_DDQN = True         # 是否使用 Double DQN 來減少 DQN 的過度估計問題。Double DQN 通過分離動作選擇和動作評估來提供更穩定的學習目標。
 
 MODEL_SAVE_PATH = "dqn_model"
-CHECKPOINT_FILE = "best_cartpole_model.pth"
+CHECKPOINT_FILE = "best_cartpole_model_dueling_dqn.pth"
 
 os.makedirs(MODEL_SAVE_PATH, exist_ok=True)
 checkpoint_path = os.path.join(MODEL_SAVE_PATH, CHECKPOINT_FILE)
@@ -72,8 +143,13 @@ action_dim = env.action_space.n
 
 # DQN 的核心思想：使用 "當前的model" 來提供 "當前狀態" 所有可能動作的Q值，但使用 "目標model" 來評估 "下一個動作" 的價值(Q值)作為學習目標，
 # 而且多個batch後才同步一次"當前的model"與"目標model"來減少訓練過程中的震盪
+"""
 policy_net = DQN(state_dim, action_dim) # 正在學習的網路, 用來預測"當前的狀態下"採取每一種可能action的Q值.
 target_net = DQN(state_dim, action_dim) # 前一次的policy_net, 被用來預測"下一個狀態可能的最大Q值", 做為學習目標.
+"""
+policy_net = DuelingDQN(state_dim, action_dim) 
+target_net = DuelingDQN(state_dim, action_dim)
+
 target_net.load_state_dict(policy_net.state_dict())     # 使用之前學習的網路來初始化目標 Q 值，讓訓練更穩定
 optimizer = optim.Adam(policy_net.parameters(), lr=LR)
 
@@ -164,7 +240,7 @@ for episode in range(EPISODES):
                     # max(1) 是指在維度1 (action_dim) 上尋找最大(Q)值以及其位置index，會返回兩個形狀為 (64,) 的張量：最大值 和 對應的索引，
                     # 我們只需要最大值，所以用 [0] 來選取。
                     next_q = target_net(next_states).max(1)[0]      # next_q 是一個形狀為 (64,) 的張量，代表 batch 中每一筆經驗對應的
-                                                                    # 下一個狀態的最大 Q 值。 這邊的 next_states 也是有 batch 維度的 !!
+                                                                    # 下一個狀態的最大 Q 值。這邊的 next_states 也是有 batch 維度的 !!
                 else:
                     # --- Option-2 : Double DQN (DDQN), 用 policy_net 選擇下一個動作, 再由target_net 評估其價值 -----------
                     # 用來解決 DQN 的 Overestimation 的問題.

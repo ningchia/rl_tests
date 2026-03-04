@@ -81,7 +81,7 @@ def run_evaluation(num_tests=10):
         while not done:
             with torch.no_grad():
                 # 完全不探索 (Epsilon=0)，只選 Q 值最高的最優動作
-                action = model(state).argmax().item()
+                action = model(state).argmax().item()   # 注意這邊的 state 沒有batch維度 !! 進model時會自動補成 (1, state_dim).
             
             # path.append(action)
             next_state, reward, terminated, truncated, _ = env.step(action)
