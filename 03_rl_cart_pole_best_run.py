@@ -2,6 +2,7 @@ import os
 import gymnasium as gym
 import torch
 import time
+import numpy as np
 
 # 這裡要引用你定義的 DQN 類別 (或直接在腳本裡重新定義一次)
 # 但是, 在 Python 中，import 語法本質上要求模組名稱必須符合 「標識符 (Identifier)」 的命名規則：不能以數字開頭。
@@ -53,7 +54,7 @@ checkpoint_path = os.path.join(MODEL_SAVE_PATH, CHECKPOINT_FILE)
 if not os.path.exists(checkpoint_path):
     raise FileNotFoundError(f"未找到檢查點檔案: {checkpoint_path}")
 
-def test_best_model():
+def run_evaluation(num_tests=10):
     # 1. 初始化環境 (使用 render_mode="human" 讓你親眼看到它在玩)
     env = gym.make("CartPole-v1", render_mode="human")
     state_dim = env.observation_space.shape[0]
@@ -64,31 +65,51 @@ def test_best_model():
     model.load_state_dict(torch.load(checkpoint_path))
     model.eval()  # 切換到評估模式
 
-    state, _ = env.reset()
-    state = torch.FloatTensor(state)
-    total_reward = 0
-    done = False
-    path = [] # 紀錄動作路徑
+    all_rewards = []
+    print(f"\n--- 開始模型評估：連續執行 {num_tests} 次 ---")
 
-    print("\n--- 開始測試最佳模型 ---")
-    
-    while not done:
-        with torch.no_grad():
-            # 完全不探索 (Epsilon=0)，只選 Q 值最高的最優動作
-            action = model(state).argmax().item()
-        
-        path.append(action)
-        next_state, reward, terminated, truncated, _ = env.step(action)
-        state = torch.FloatTensor(next_state)
-        total_reward += reward
-        done = terminated or truncated
-        
-        # 稍微暫停一下，才不會飛快閃過
-        time.sleep(0.02)
+    for i in range(num_tests):
 
-    print(f"測試結束，總得分: {total_reward}")
-    print(f"最佳路徑動作序列: {path}")
+        state, _ = env.reset()
+        state = torch.FloatTensor(state)
+        total_reward = 0
+        done = False
+        # path = [] # 紀錄動作路徑
+
+        print("\n--- 開始測試最佳模型 ---")
+        
+        while not done:
+            with torch.no_grad():
+                # 完全不探索 (Epsilon=0)，只選 Q 值最高的最優動作
+                action = model(state).argmax().item()
+            
+            # path.append(action)
+            next_state, reward, terminated, truncated, _ = env.step(action)
+            state = torch.FloatTensor(next_state)
+            total_reward += reward
+            done = terminated or truncated
+            
+            # 稍微暫停一下，才不會飛快閃過
+            # 測試時可適度縮短 sleep 或拿掉以節省時間
+            # time.sleep(0.02)
+
+        # print(f"測試結束，總得分: {total_reward}")
+        # print(f"最佳路徑動作序列: {path}")
+        all_rewards.append(total_reward)
+        print(f"第 {i+1} 次測試，總得分: {total_reward}")
+
+    # 3. 輸出統計結果
+    avg_score = np.mean(all_rewards)
+    std_score = np.std(all_rewards)
+    print("\n" + "="*30)
+    print(f"評估完成！")
+    print(f"平均得分: {avg_score:.2f}")
+    print(f"標準差: {std_score:.2f}")
+    print(f"最高分: {np.max(all_rewards)}")
+    print(f"最低分: {np.min(all_rewards)}")
+    print("="*30)
+
     env.close()
 
 if __name__ == "__main__":
-    test_best_model()
+    run_evaluation(10)
