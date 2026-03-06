@@ -56,6 +56,17 @@ if not os.path.exists(checkpoint_path):
 
 def run_evaluation(num_tests=10):
     # 1. 初始化環境 (使用 render_mode="human" 讓你親眼看到它在玩)
+    #    ref: https://gymnasium.farama.org/environments/classic_control/cart_pole/
+    #
+    # ENV attribute "rendor_mode" : related to how the environment visualizes its state.:
+    #   ref : https://gymnasium.farama.org/api/env/#gymnasium.Env.render
+    #   (starting from v0.25.0, ENV method "render()" no longer accept parameters.)
+    # (none): 不啟用渲染，適合訓練過程中使用，節省資源。
+    # human: 啟用人類可見的渲染，適合評估過程中使用，可以看到智能體的行為。
+    #        注意：如果你在訓練過程中使用了 render_mode="human"，可能會導致訓練速度變慢，因為渲染需要額外的計算資源。
+    # ansi: 返回環境狀態的 ANSI 字符串，適合在終端中查看環境狀態。
+    # rgb_array: 返回環境狀態的 RGB 圖像數組，適合需要圖像輸入的模型。
+    # rgb_array_list: 返回環境狀態的 RGB 圖像數組列表，適合需要多幀圖像輸入的模型。
     env = gym.make("CartPole-v1", render_mode="human")
     state_dim = env.observation_space.shape[0]
     action_dim = env.action_space.n

@@ -64,6 +64,7 @@ checkpoint_path = os.path.join(MODEL_SAVE_PATH, CHECKPOINT_FILE)
 best_reward = 0  # 紀錄歷史最高分
 
 # 3. 初始化環境與模型
+#    ref: https://gymnasium.farama.org/environments/classic_control/cart_pole/
 env = gym.make("CartPole-v1")
 # state_dim 取決於環境。在 CartPole 中是 4 維（位置、速度、角度、角速度）
 # action_dim 取決於環境。在 CartPole 中是 2（向左或向右）。

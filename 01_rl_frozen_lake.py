@@ -2,6 +2,7 @@
 # 注意是 gymnasium[toy-text] 不是 gymnasium，因為 FrozenLake 是一個「文字遊戲」環境。
 # ref: https://gymnasium.farama.org/index.html
 #      https://vocus.cc/article/67678732fd897800010a5836
+#      https://gymnasium.farama.org/environments/toy_text/frozen_lake/
 
 import numpy as np
 import gymnasium as gym
@@ -9,6 +10,7 @@ import random
 
 # 1. 初始化環境
 # is_slippery=False 讓物理規則簡單點：往哪走就真的往哪走
+# ref: https://gymnasium.farama.org/environments/toy_text/frozen_lake/
 env = gym.make('FrozenLake-v1', desc=None, map_name="4x4", is_slippery=False, render_mode="human")
 
 # 2. 初始化 Q 表格 (16 個狀態 x 4 個動作)
