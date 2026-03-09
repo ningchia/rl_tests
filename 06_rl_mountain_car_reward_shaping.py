@@ -52,6 +52,9 @@ ENV_NAME = "MountainCar-v0"
 GAMMA = 0.99
 LEARNING_RATE = 0.001
 MEMORY_SIZE = 20000         # MountainCar 需要較大的記憶池
+# 在複雜的地形中，Agent 會存入大量的「失敗經驗」（在谷底亂晃）。
+# 增大 Batch Size 讓神經網路在一次更新中，有更高的機率同時抽到「失敗的晃動」與「成功的衝刺」，
+# 這能讓梯度更新的方向更準確，不會被大量的負面經驗帶偏。
 BATCH_SIZE = 128            # 增加批次大小以穩定訓練
 EPSILON_START = 1.0
 EPSILON_END = 0.01
@@ -167,6 +170,7 @@ for episode in range(EPISODES):
 
             # 強化(指數級)位能獎勵：因為山谷底部在 -0.5, 當位置大於 -0.5 時，這個值會隨距離增加而加速變大。
             # 用這個打破對稱性，告訴 Agent 右邊才是正確的方向.
+            # 比起固定的 bonus，指數型函數提供了一個平滑的斜率，這讓神經網路的導函數（Derivative）能持續指引方向，而不是在某個閾值突然跳變。
             height_reward = 0
             if position > -0.5:
                 height_reward = ((position + 0.5) * 10) ** 2  # 指數級增加高度獎勵

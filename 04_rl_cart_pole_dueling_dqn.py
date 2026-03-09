@@ -249,7 +249,7 @@ for episode in range(EPISODES):
                     # DDQN：問專家 A (target_net) 哪個方案最好，專家 A 說方案一。
                     #       你轉頭問專家 B (policy_net)：「方案一你覺得值幾分？」專家 B 比較冷靜，說：「我覺得只值 60 分。」
 
-                    # 1. 由 Policy Net 選出「看起來最強」的動作 (Selection). 
+                    # 1. 由 Policy Net 選出下一個狀態下「看起來最強」的動作 (Selection). 
                     #    keepdim=True 是為了保持維度，這樣 best_actions 的形狀就會是 (64, 1)，方便後面用 gather 函數來選取對應的 Q 值。
                     #    如果不使用 keepdim=True，best_actions 的形狀會是 (64,)，這樣在後面用 gather 函數時就會出現維度不匹配的問題。
                     best_actions = policy_net(next_states).argmax(dim=1, keepdim=True)      # 形狀: (64, 1). 

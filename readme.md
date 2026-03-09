@@ -3,10 +3,10 @@
 請先安裝 Python 3.9+，再依需求安裝以下套件。
 
 ### 一次安裝（建議）
-> 若你要同時執行 `01_rl_frozen_lake.py` 與 `02_rl_cart_pole.py`
+> 若你要同時執行所有練習
 
 ```bash
-pip install -U numpy gymnasium[toy-text] torch tensorboard "setuptools<82.0.0"
+pip install -U numpy gymnasium[toy-text,box2d] torch tensorboard "setuptools<82.0.0"
 ```
 
 ### 依腳本安裝
@@ -19,6 +19,11 @@ pip install -U numpy "gymnasium[toy-text]"
 **02_rl_cart_pole.py**
 ```bash
 pip install -U numpy gymnasium torch tensorboard "setuptools<82.0.0"
+```
+
+**08_rl_lunar_lander.py**
+```bash
+pip install -U numpy gymnasium[box2d] torch tensorboard "setuptools<82.0.0"
 ```
 
 ### 備註
