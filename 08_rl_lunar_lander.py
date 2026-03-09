@@ -75,7 +75,7 @@ ENV_NAME = "LunarLander-v3"
 GAMMA = 0.99
 LEARNING_RATE = 0.0005     # 稍微調低學習率以求穩定
 MEMORY_SIZE = 50000        # 大記憶池. 幫助模型在長時間的嘗試中記住「偶然成功降落」的經驗。
-BATCH_SIZE = 128           # 大 Batch 增加梯度穩定性
+BATCH_SIZE = 128           # 大 Batch 增加梯度穩定性. 如果有GPU可以更大一些。
 EPSILON_START = 1.0
 EPSILON_END = 0.01
 EPSILON_DECAY = 0.996      # 較慢的衰減. 前期非常容易墜毀，所以讓探索時間拉長一點。
@@ -84,6 +84,18 @@ EPISODES = 1000            # 通常 600-800 局可達 200 分
 
 USE_DDQN = True         # 是否使用 Double DQN 來減少 DQN 的過度估計問題。Double DQN 通過分離動作選擇和動作評估來提供更穩定的學習目標。
 
+MODEL_SAVE_PATH = "dqn_model"
+CHECKPOINT_FILE = "best_lunarlander_model.pth"
+
+os.makedirs(MODEL_SAVE_PATH, exist_ok=True)
+checkpoint_path = os.path.join(MODEL_SAVE_PATH, CHECKPOINT_FILE)
+
+# 設定設備 (GPU 或 CPU)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+if device.type == "cuda":
+    BATCH_SIZE = 256  # 如果有 GPU，可以使用更大的 Batch Size 來加速訓練
+print(f"目前使用的設備: {device}, Batch Size: {BATCH_SIZE}")
+
 # 初始化.
 # 在訓練過程中不需要 render，等訓練完成後再用測試腳本來觀看模型表現。
 # env = gym.make(ENV_NAME, render_mode="human")     
@@ -91,8 +103,8 @@ env = gym.make(ENV_NAME)
 state_dim = env.observation_space.shape[0]
 action_dim = env.action_space.n
 
-policy_net = DuelingDQN(state_dim, action_dim)
-target_net = DuelingDQN(state_dim, action_dim)
+policy_net = DuelingDQN(state_dim, action_dim).to(device)
+target_net = DuelingDQN(state_dim, action_dim).to(device)
 target_net.load_state_dict(policy_net.state_dict())
 optimizer = optim.Adam(policy_net.parameters(), lr=LEARNING_RATE)
 memory = deque(maxlen=MEMORY_SIZE)
@@ -101,7 +113,6 @@ current_time = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
 writer = SummaryWriter(f'runs/DuelingDQN_LunarLander_{current_time}')
 
 best_reward = -np.inf
-checkpoint_path = "best_lunarlander_model.pth"
 
 for episode in range(EPISODES):
     state, _ = env.reset()
@@ -118,7 +129,9 @@ for episode in range(EPISODES):
         else:
             with torch.no_grad():
                 # 注意這邊的 state 沒有batch維度 !! 進model時會自動補成 (1, state_dim).
-                action = policy_net(torch.FloatTensor(state)).argmax().item() 
+                # 推論時也要把 state 搬到 GPU
+                state_t = torch.FloatTensor(state).to(device)
+                action = policy_net(state_t).argmax().item() 
         
         next_state, reward, terminated, truncated, _ = env.step(action)
         done = terminated or truncated
@@ -138,11 +151,11 @@ for episode in range(EPISODES):
             batch = random.sample(memory, BATCH_SIZE)
             s_batch, a_batch, r_batch, ns_batch, d_batch = zip(*batch)
             
-            s_batch = torch.FloatTensor(np.array(s_batch))
-            a_batch = torch.LongTensor(a_batch).unsqueeze(1)
-            r_batch = torch.FloatTensor(r_batch)
-            ns_batch = torch.FloatTensor(np.array(ns_batch))
-            d_batch = torch.FloatTensor(d_batch)
+            s_batch = torch.FloatTensor(np.array(s_batch)).to(device)
+            a_batch = torch.LongTensor(a_batch).to(device).unsqueeze(1)
+            r_batch = torch.FloatTensor(r_batch).to(device)
+            ns_batch = torch.FloatTensor(np.array(ns_batch)).to(device)
+            d_batch = torch.FloatTensor(d_batch).to(device)
             
             # policy_net(s_batch) 的輸出是 (BATCH_SIZE, action_dim)，我們用 gather 取出對應動作的 Q 值.
             # current_q 的 shape 是 (BATCH_SIZE, 1)，而 target_q 的 shape 是 (BATCH_SIZE,)，所以在計算 loss 時要把 current_q 壓平成 (BATCH_SIZE,)
