@@ -105,6 +105,21 @@ action_dim = env.action_space.n
 
 policy_net = DuelingDQN(state_dim, action_dim).to(device)
 target_net = DuelingDQN(state_dim, action_dim).to(device)
+
+# --- 載入舊有的經驗 ---
+if os.path.exists(checkpoint_path):
+    print(f"--- 偵測到既有模型權重 {checkpoint_path}，載入中... ---")
+    # 記得使用 map_location 確保設備正確
+    state_dict = torch.load(checkpoint_path, map_location=device)
+    policy_net.load_state_dict(state_dict)
+    target_net.load_state_dict(state_dict)
+    
+    # 既然已經有基礎了，我們可以把初始探索率 EPSILON_START 調低
+    # 例如從 0.3 開始，而不是 1.0，這樣可以減少前期亂噴氣的時間
+    EPSILON_START = 0.3 
+else:
+    print("--- 未發現既有權重，將從隨機初始化開始訓練 ---")
+
 target_net.load_state_dict(policy_net.state_dict())
 optimizer = optim.Adam(policy_net.parameters(), lr=LEARNING_RATE)
 memory = deque(maxlen=MEMORY_SIZE)
