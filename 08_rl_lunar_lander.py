@@ -81,11 +81,12 @@ EPSILON_START = 1.0
 EPSILON_END = 0.01
 EPSILON_DECAY = 0.996      # 較慢的衰減. 前期非常容易墜毀，所以讓探索時間拉長一點。
 TARGET_UPDATE = 10
-EPISODES = 1000            # 一般需要run 2 到 3次 1000 局(第二次後都讓EPSILON_START回到0.3)的訓練後效果才比較好
+EPISODES = 1000            # 好像要 run 兩次 1000 局(第二次後都讓EPSILON_START回到0.1)的訓練後效果才稍微比較好
 
 USE_DDQN = True            # 是否使用 Double DQN 來減少 DQN 的過度估計問題。Double DQN 通過分離動作選擇和動作評估來提供更穩定的學習目標。
 USE_SOFT_UPDATE = True     # 是否使用軟更新 (Soft Update) 來平滑地更新目標網路的權重。軟更新會將目標網路的權重逐步向當前網路的權重靠攏，這有助於穩定訓練過程。
-TAU = 0.005                # 軟更新的係數，值越小表示更新越慢，通常在 0.001 到 0.01 之間選擇。
+TAU = 0.002                # 軟更新的係數，值越小表示更新越慢，通常在 0.001 到 0.01 之間選擇。
+USE_REWARD_SHAPING = True  # 是否使用獎勵塑形 (Reward Shaping) 來引導 AI 學習更有效的策略。獎勵塑形可以通過提供額外的獎勵信號來幫助 AI 更快地學習，但需要謹慎設計以避免引入偏差。
 
 MODEL_SAVE_PATH = "dqn_model"
 CHECKPOINT_FILE = "best_lunarlander_model.pth"
@@ -118,8 +119,9 @@ if os.path.exists(checkpoint_path):
     target_net.load_state_dict(state_dict)
     
     # 既然已經有基礎了，我們可以把初始探索率 EPSILON_START 調低
-    # 例如從 0.3 開始，而不是 1.0，這樣可以減少前期亂噴氣的時間
-    EPSILON_START = 0.3 
+    # 例如從 0.1 開始，而不是 1.0，這樣可以減少前期亂噴氣的時間
+    EPSILON_START = 0.1 
+    EPSILON_END = 0.001
 else:
     print("--- 未發現既有權重，將從隨機初始化開始訓練 ---")
 
@@ -155,102 +157,106 @@ for episode in range(EPISODES):
         next_state, reward, terminated, truncated, _ = env.step(action)
         done = terminated or truncated
 
-        # ------------------------------------------------------------
-        # Reward shaping:
-        #
-        # 注意 Reward Shaping 太重了會蓋過環境原本的目標，甚至讓 AI 學壞（Reward Hacking）。
-        # 量級對齊法則 (Magnitude Alignment):
-        #   最基本的規則是：Shaping 的總和，不應該超過原始環境單步 Reward 的量級。
-        #   觀察原始值：Lunar Lander 每步的 Reward 通常在 -1.0 到 +1.0 之間（墜毀或降落除外）。
-        #   所以 reward shaping 建議控制在原始值的 10% ~ 50% 之間。
-        #   如果原始 Reward 是 1.0，你的 Shaping 設定在 0.1 ~ 0.5 比較安全。
-        #   如果給一個高達 10.0 的 Shaping，Agent 會發現：「只要在那邊練習拿 Shaping 就好了，幹嘛要冒險去降落？」
-        # 總分守恆原則 (Total Potential Rule):
-        #   這是一個比較進階的視角：不管加了多少 Shaping，一局下來的「額外獎勵」總和，應該遠小於「成功完成任務」的大獎.
-        #   Lunar Lander 成功降落有 +100 ~ +200 分。
-        #   守恆檢查：如果你每一步都給 0.5 的「高度獎勵」，一局跑 400 步，AI 就拿到了 200 分。
-        #   這時 AI 會覺得：「我不降落也拿到了滿分，那我就在空中跳舞吧！」
-        #   經驗法則：Shaping 的累積總分，建議不要超過最終大獎的 20% ~ 30%。
-        # 使用Potential-based Reward Shaping:
-        #   這是學術界最推薦的方法。為了避免 AI 為了刷分而來回刷獎勵，Shaping 應該以「狀態的差異」來給予，而不是給「固定值」。
-        #   錯誤寫法：if angle < 0.1: reward += 0.1 (AI 可能會在那邊抖動來反覆領這 0.1 分)。
-        #   正確寫法：shaping = (prev_dist - current_dist)。
-        #   意義：這代表「進步了才給獎勵」。如果 AI 走回頭路，這個值就會變負的，自動抵銷。
-        # 根據經驗，不同類型的行為建議給予不同的權重：(相對於單步)
-        #   目的生存/時間懲罰 -0.01 ~ -0.1, 逼它快點結束任務
-        #   精細控制 (如角度/速度) -0.05 ~ -0.2, 微調動作，不宜過大以免變膽小
-        #   里程碑 (如腳觸地) +1.0 ~ +5.0, 標示階段性成功
-        #   關鍵懲罰 (如翻覆/墜毀)-50 ~ -100, 必須讓它「刻骨銘心」
-        # 記得在 TensorBoard 分開紀錄兩個數值：
-        #   Real Reward：環境給的原始分數（真理）。
-        #   Shaped Reward：加料後的分數（誘導）。
-        #   如果 Shaped Reward 一直升，但 Real Reward 沒動，說明 AI 在「鑽漏洞（Reward Hacking）」，你的 Shaping 給太重或邏輯有誤。
-        #   如果 Shaped Reward 升得很慢，說明 Shaping 太淡，AI 感覺不到引導。
-        # -------------------------------------------------------------
-        x = next_state[0]               # 水平位置, range : -2.5 ... 2.5
-        height = next_state[1]          # 垂直高度, range : -2.5 ... 2.5
-        vel_x = next_state[2]           # 水平速度, range : -10 ... 10
-        vel_y = next_state[3]           # 垂直速度, range : -10 ... 10
-        angle = next_state[4]           # 角度, range : -6.2831855 ... 6.2831855 (360度的弧度表示)
-        angular_velocity = next_state[5]   # 角速度, range : -10 ... 10
-        leg_left_contact = next_state[6]   # 左腳接觸地面
-        leg_right_contact = next_state[7]  # 右腳接觸地面
-        
-        custom_reward = reward  # 預設為原始獎勵，後續會加上 shaping 的部分
-
-        # 稍微強化著地的正面回饋, 鼓勵及早降落. 
-        if leg_left_contact == 1 or leg_right_contact == 1:
-            custom_reward += 1.0
-
-        # 修正「初期不調整」：
-        # 讓它在高度還很高時就趕快往中央（x=0）靠攏。
-        # 如果水平位置偏離中心 (x 不等於 0)，且高度還很高 (y > 0.5, 最高約 1.5)，就給予負分，鼓勵它早點調整。
-        # 高度越高時，對位移的忍受度越低，強迫它在高處就對準目標
-        dist_from_center = abs(x)
-        if height > 0.5:
-            custom_reward -= dist_from_center * 0.1    # x range : -2.5 ... 2.5
-
-        # 我們希望角度盡量接近 0 (垂直向上)
-        custom_reward -= abs(angle) * 0.05              # angle range : -6.2831855 ... 6.2831855
-
-        # 改善「翻倒墜毀」：
-        # 1. 強化角速度懲罰 (防止瘋狂旋轉)
-        custom_reward -= abs(angular_velocity) * 0.05   # angular velocity range : -10 ... 10
-
-        # 朝向中心移動的速度獎勵:
-        # 如果距離中心遠，我們就獎勵「朝向中心移動的速度」；如果已經在中心上方，則獎勵「水平靜止」。
-        # 如果 dist_x 為正(在右邊)，vel_x 為負(往左移)才是正確方向. 二者相乘為負代表方向正確.
-        # 在高空時鼓勵往中心靠
-        if height > 0.3 :
-            custom_reward += -x * vel_x * 0.1  # 獎勵朝中心移動的速度. x range : -2.5 ... 2.5, vel_x range : -10 ... 10
-        
-        # 修正「下降太快」：垂直速度控制
-        # 理想的下降速度隨高度減少。高處可以快一點，低處必須慢。也要避免停在空中太久。
-        # 如果在低空 (height < 0.4)且下降太快才罰 (vel_y 是負的代表下降)
-        if vel_y < -0.4 and height < 0.5:
-            custom_reward -= abs(vel_y) * 0.1
-
-        # 修正「著陸後亂噴」：速度與觸地懲罰
-        # 一旦腳部接觸地面，我們應該強烈要求它靜止。
-        if leg_left_contact > 0 or leg_right_contact > 0:
-            # 懲罰觸地後的殘餘速度，強迫它安分下來
-            custom_reward -= (abs(vel_x) + abs(vel_y)) * 0.1   # vel_x range : -10 ... 10, vel_y range : -10 ... 10
+        if USE_REWARD_SHAPING:
+            # ------------------------------------------------------------
+            # Reward shaping: (還沒有調到很好...)
+            #
+            # 注意 Reward Shaping 太重了會蓋過環境原本的目標，甚至讓 AI 學壞（Reward Hacking）。
+            # 量級對齊法則 (Magnitude Alignment):
+            #   最基本的規則是：Shaping 的總和，不應該超過原始環境單步 Reward 的量級。
+            #   觀察原始值：Lunar Lander 每步的 Reward 通常在 -1.0 到 +1.0 之間（墜毀或降落除外）。
+            #   所以 reward shaping 建議控制在原始值的 10% ~ 50% 之間。
+            #   如果原始 Reward 是 1.0，你的 Shaping 設定在 0.1 ~ 0.5 比較安全。
+            #   如果給一個高達 10.0 的 Shaping，Agent 會發現：「只要在那邊練習拿 Shaping 就好了，幹嘛要冒險去降落？」
+            # 總分守恆原則 (Total Potential Rule):
+            #   這是一個比較進階的視角：不管加了多少 Shaping，一局下來的「額外獎勵」總和，應該遠小於「成功完成任務」的大獎.
+            #   Lunar Lander 成功降落有 +100 ~ +200 分。
+            #   守恆檢查：如果你每一步都給 0.5 的「高度獎勵」，一局跑 400 步，AI 就拿到了 200 分。
+            #   這時 AI 會覺得：「我不降落也拿到了滿分，那我就在空中跳舞吧！」
+            #   經驗法則：Shaping 的累積總分，建議不要超過最終大獎的 20% ~ 30%。
+            # 使用Potential-based Reward Shaping:
+            #   這是學術界最推薦的方法。為了避免 AI 為了刷分而來回刷獎勵，Shaping 應該以「狀態的差異」來給予，而不是給「固定值」。
+            #   錯誤寫法：if angle < 0.1: reward += 0.1 (AI 可能會在那邊抖動來反覆領這 0.1 分)。
+            #   正確寫法：shaping = (prev_dist - current_dist)。
+            #   意義：這代表「進步了才給獎勵」。如果 AI 走回頭路，這個值就會變負的，自動抵銷。
+            # 根據經驗，不同類型的行為建議給予不同的權重：(相對於單步)
+            #   目的生存/時間懲罰 -0.01 ~ -0.1, 逼它快點結束任務
+            #   精細控制 (如角度/速度) -0.05 ~ -0.2, 微調動作，不宜過大以免變膽小
+            #   里程碑 (如腳觸地) +1.0 ~ +5.0, 標示階段性成功
+            #   關鍵懲罰 (如翻覆/墜毀)-50 ~ -100, 必須讓它「刻骨銘心」
+            # 記得在 TensorBoard 分開紀錄兩個數值：
+            #   Real Reward：環境給的原始分數（真理）。
+            #   Shaped Reward：加料後的分數（誘導）。
+            #   如果 Shaped Reward 一直升，但 Real Reward 沒動，說明 AI 在「鑽漏洞（Reward Hacking）」，你的 Shaping 給太重或邏輯有誤。
+            #   如果 Shaped Reward 升得很慢，說明 Shaping 太淡，AI 感覺不到引導。
+            # -------------------------------------------------------------
             
-            # [關鍵] 如果腳觸地了，卻還在發動引擎 (action != 0)，給予額外懲罰，鼓勵它一旦著陸就不要再亂噴氣了。
-            if action != 0:
-                custom_reward -= 1.0
+            # x : 水平位置, range : -2.5 ... 2.5
+            # height : 垂直高度, range : -2.5 ... 2.5
+            # vel_x : 水平速度, range : -10 ... 10
+            # vel_y : 垂直速度, range : -10 ... 10
+            # angle : 角度, range : -6.2831855 ... 6.2831855 (360度的弧度表示)
+            # angular_velocity : 角速度, range : -10 ... 10
+            # leg_left_contact : 左腳接觸地面
+            # leg_right_contact : 右腳接觸地面
+            x, height, vel_x, vel_y, angle, angular_velocity, leg_left_contact, leg_right_contact = next_state
+            
+            custom_reward = reward  # 預設為原始獎勵，後續會加上 shaping 的部分
 
-        # 如果墜毀 (reward == -100)，我們手動加重一點點
-        if terminated and reward <= -90:
-            custom_reward = -200 # 讓它對墜毀更反感
+            # 稍微強化著地的正面回饋, 鼓勵及早降落. 
+            if leg_left_contact == 1 and leg_right_contact == 1:
+                custom_reward += 0.3
+                
+            # 修正「初期不調整」：
+            # 讓它在高度還很高時就趕快往中央（x=0）靠攏。
+            # 如果水平位置偏離中心 (x 不等於 0)，且高度還很高 (y > 0.5, 最高約 1.5)，就給予負分，鼓勵它早點調整。
+            # 高度越高時，對位移的忍受度越低，強迫它在高處就對準目標
+            dist_from_center = abs(x)
+            if height > 0:
+                custom_reward -= dist_from_center * 0.05    # x range : -2.5 ... 2.5
 
-        # -------------------------------------------------------------
+            # 我們希望角度盡量接近 0 (垂直向上)
+            if abs(angle) > 0.1:  # 只有當角度偏離超過 0.1 弧度（約 5.7 度）才開始懲罰，這樣小誤差不會被過度懲罰。
+                custom_reward -= abs(angle) * 0.1              # angle range : -6.2831855 ... 6.2831855
+
+            # 改善「翻倒墜毀」：
+            # 1. 強化角速度懲罰 (防止瘋狂旋轉)
+            custom_reward -= abs(angular_velocity) * 0.05   # angular velocity range : -10 ... 10
+
+            # 朝向中心移動的速度獎勵:
+            # 如果距離中心遠，我們就獎勵「朝向中心移動的速度」；如果已經在中心上方，則獎勵「水平靜止」。
+            # 如果 dist_x 為正(在右邊)，vel_x 為負(往左移)才是正確方向. 二者相乘為負代表方向正確.
+            # 在高空時鼓勵往中心靠
+            if height > 0 :
+                custom_reward += -x * vel_x * 0.03  # 獎勵朝中心移動的速度. x range : -2.5 ... 2.5, vel_x range : -10 ... 10
+            
+            # 修正「下降太快」：垂直速度控制
+            # 理想的下降速度隨高度減少。高處可以快一點，低處必須慢。也要避免停在空中太久。
+            # 如果在低空 (height < 0)且下降太快才罰 (vel_y 是負的代表下降)
+            if vel_y < -0.5 and height < 0:         # range: vel_y : -10 ... 10, height : -2.5 ... 2.5
+                custom_reward -= abs(vel_y) * 0.02
+
+            # 修正「著陸後亂噴」：速度與觸地懲罰
+            # 一旦腳部接觸地面，我們應該強烈要求它靜止。
+            if leg_left_contact > 0 or leg_right_contact > 0:
+                # 懲罰觸地後的殘餘速度，強迫它安分下來
+                custom_reward -= (abs(vel_x) + abs(vel_y)) * 0.01   # vel_x range : -10 ... 10, vel_y range : -10 ... 10
+                
+                # [關鍵] 如果腳觸地了，卻還在發動引擎 (action != 0)，給予額外懲罰，鼓勵它一旦著陸就不要再亂噴氣了。
+                if action != 0:
+                    custom_reward -= 0.2
+
+            # 如果墜毀 (reward == -100)，我們手動加重一點點
+            if terminated and reward <= -90:
+                custom_reward = -200 # 讓它對墜毀更反感
+            # -------------------------------------------------------------
 
         # 儲存經驗並更新狀態
         memory.append((state, action, reward, next_state, done))
         state = next_state
         total_reward += reward
-        total_shaped_reward += custom_reward
+        if USE_REWARD_SHAPING:
+            total_shaped_reward += custom_reward
 
         # 訓練邏輯
         if len(memory) > BATCH_SIZE:
@@ -307,7 +313,10 @@ for episode in range(EPISODES):
         torch.save(policy_net.state_dict(), checkpoint_path)
     
     writer.add_scalar('Performance/Reward', total_reward, episode)
-    writer.add_scalar('Performance/Shaped_Reward', total_shaped_reward, episode)
-    print(f"Episode {episode}, Reward: {total_reward:.2f}, Shaped: {total_shaped_reward:.2f}, Epsilon: {epsilon:.2f}")
+    if USE_REWARD_SHAPING:
+        writer.add_scalar('Performance/Shaped_Reward', total_shaped_reward, episode)
+        print(f"Episode {episode}, Reward: {total_reward:.2f}, Shaped: {total_shaped_reward:.2f}, Epsilon: {epsilon:.2f}")
+    else:
+        print(f"Episode {episode}, Reward: {total_reward:.2f}, Epsilon: {epsilon:.2f}")
 
 writer.close()
