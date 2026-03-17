@@ -54,16 +54,15 @@
 # 這裡我們實作 PPO，因為它在連續控制任務中表現穩定，且相對容易調整超參數。
 # 基本上 PPO 的 model 輸出由3個head組成, 分成兩組 :
 #
-#   Actor : 由兩個head組成輸出一個機率曲線,  代表 action 設定值的可能範圍與其機率.
+#   Actor : 由兩個head組成輸出一個機率曲線,  代表 action 設定值範圍內的"偏好機率分布".
 #           head0 輸出 mu (平均值), head1 輸出 sigma(標準差)
 #           注意 mu 與 sigma 的維度就是"action 設定值"的維度. 
 #           以這個例子為例, action有2組 (左右噴, 往下噴), 所以mu與sigma其實定義了兩條 機率分布曲線,
 #           分別代表 左右噴 與 往下噴 引擎的設定值範圍. 
-#           在選擇動作時, 因為每個動作的大小"程度"是連續的值, 就用這機率曲線定義的機率分布取樣一個範圍
-#           內的值作為action的設定值. 
+#           在選擇動作時, 因為每個動作的大小"程度"是連續的值, 就用這個"偏好機率分布"取樣一個動作設定值. 
 #           而之前在DQN裡, 當取樣的random值小於epsilon就隨機選一個動作, 在PPO裡則相當於sigma的意思, 
-#           sigma 大就代表有比較高的機率選到非平均值的設定值, 代表"可能嘗試"的動作設定值範圍比較大的意思, 
-#           而 mu 就相當於目前最prefer的, "學得最好"的動作程度大小值的意思.
+#           sigma 大就代表有比較高的機率選到非平均值的設定值, 代表可能嘗試的"非預期最好"的動作設定值範圍比較大的意思, 
+#           而 mu 就相當於目前最prefer的, "預期效果最好"的動作程度設定值的意思.
 #
 #  Critic : 由一個head組成, 輸出一個數值, 代表"當前狀態"一直到終局, 最有可能的平均狀態價值 (V-value).
 #           精確地說, 是
@@ -97,7 +96,7 @@ class PPOModel(nn.Module):
     def __init__(self, state_dim, action_dim):
         super(PPOModel, self).__init__()
         # 共同特徵層
-        self.fc = nn.Sequential(
+        self.fc = nn.Sequential(                        # 輸入形狀: [batch_size, state_dim]
             nn.Linear(state_dim, 256),
             nn.ReLU(),
             nn.Linear(256, 256),
@@ -109,11 +108,11 @@ class PPOModel(nn.Module):
         # 第一維度 (Main Engine)：控制垂直方向噴力。數值範圍：[0, 1]（但模型輸出後通常映射到這裡）。
         # 第二維度 (Side Engines)：控制水平方向噴力。數值範圍：[-1, 1]。
         # 負數代表向右噴（推力向左），正數代表向左噴（推力向右）。
-        self.actor_mu = nn.Linear(256, action_dim)      # head0: 輸出動作設定值的均值 (mu)
-        self.actor_sigma = nn.Linear(256, action_dim)   # head1: 輸出動作設定值的標準差 (sigma)
+        self.actor_mu = nn.Linear(256, action_dim)      # head0: 輸出動作設定值的均值 (mu), 形狀: [batch_size, action_dim]
+        self.actor_sigma = nn.Linear(256, action_dim)   # head1: 輸出動作設定值的標準差 (sigma), 形狀: [batch_size, action_dim]
         
         # Critic: 輸出預期從目前狀態到終局的累計(打折後的)狀態價值 (V-value)
-        self.critic = nn.Linear(256, 1)                 # head2: 輸出預期到終局能獲得的,與動作無關的狀態價值 (value)
+        self.critic = nn.Linear(256, 1)                 # head2: 輸出預期到終局能獲得的,與動作無關的狀態價值 (value), 形狀: [batch_size, 1]
 
     def forward(self, state):
         x = self.fc(state)
@@ -152,12 +151,12 @@ class PPOAgent:
         state = torch.FloatTensor(state).to(self.device)    # 將當前狀態轉換為 Tensor，並移動到 GPU（如果可用）。
         with torch.no_grad():
             # 用舊 policy 網路 (self.policy_old) 輸出:
-            #   1. 下一個action設定值範圍的機率分布(設定值的prefer程度)
+            #   1. 下一個action設定值的偏好機率分布
             #   2. 預測以目前的actor能力, 從目前狀態到終局預期能拿到的所有Reward(狀態價值V)的總和(打折後的累計值）.
-            # 注意這邊的輸出(mu, sigma, value) 本身就是 長度為 2 的向量.
-            mu, sigma, value = self.policy_old(state)
+            # 注意這邊的輸出(mu, sigma) 本身就是 長度為 2 的向量, value 是長度為 1 的向量.
+            mu, sigma, value = self.policy_old(state)           # 形狀: [1, action_dim], [1, action_dim], [1, 1]
             
-        # 根據 mu 和 sigma 定義一個map在action設定值範圍的正態機率分佈 (Normal distribution)，
+        # 根據 mu 和 sigma 定義一個map在action設定值範圍的偏好正態機率分佈 (Normal distribution)，
         # 然後從這個分佈中隨機取樣一個動作設定值 (action)。
         # 這裡的 action 是一個包含兩個數值的向量，分別代表主引擎和側邊引擎的推力大小。
         dist = Normal(mu, sigma)
@@ -165,7 +164,7 @@ class PPOAgent:
         # 將該設定值的 log 機率 (log probability) 記錄下來，這個等一下在計算優勢函數時會用到。
         # .sum(dim=-1) 是因為 action 是一個向量（包含兩個動作維度- 往下噴, 左右噴），我們需要把這兩個動作維度
         # 的 log 機率(在最後的維度上)加總起來，來得到整體動作的 log 機率。
-        action_logprob = dist.log_prob(action).sum(dim=-1)
+        action_logprob = dist.log_prob(action).sum(dim=-1)          # 形狀: [1], 這邊的1是batch維度.
         
         # 將蒐集到的資料 (state, 選擇的下一個動作設定值, 該設定值的logprobs, 以及該state預期到終局的value) 
         # 都記錄到 Storage 中。
@@ -173,9 +172,12 @@ class PPOAgent:
         storage.actions.append(action)
         storage.logprobs.append(action_logprob)
         storage.values.append(value)
-        # 將動作從 Tensor 轉換回 NumPy 陣列，以便在環境中使用。
+        # 將動作從 Tensor 轉換回 NumPy 陣列並限制在 [-1, 1] 確保符合 Gym 規範，以便在環境中使用。
         # .cpu() 是將 Tensor 從 GPU 移回 CPU，numpy() 是將 Tensor 轉換為 NumPy 陣列。
-        return action.cpu().numpy() 
+        act_out = action.cpu().numpy()
+        # 主引擎 (act_out[0]) 在環境中 [0, 1] 噴火，負數不噴。
+        # 側邊引擎 (act_out[1]) 在環境中 [-1, 1]。
+        return np.clip(act_out, -1.0, 1.0) 
 
     # 訓練 policy 階段.
     # 訓練過程使用的loss分成幾個部分 : 
@@ -191,8 +193,8 @@ class PPOAgent:
     #        與 被map到舊policy曲線上的機率 的比率, 就代表正在調整中的 "新policy" 相對於 "舊policy" 對同樣
     #        這個動作設定值的偏愛程度趨勢, 是更加偏愛(>1), 還是更不偏愛(<1). 
     #        
-    #      然而, Actor的這個調整方向不一定是正確的, 有可能新policy更偏愛這個動作, 但是這個動作造成的最終累計reward
-    #      可能比起採用其他更不偏愛的動作的最終累計reward 還要低.
+    #      然而, Actor對偏好機率分布的這個調整方向不一定是正確的, 有可能新policy更偏愛這個動作, 但是這個動作
+    #      造成的最終累計reward 可能比起採用其他更不偏愛的動作的最終累計reward 還要低.
     #      所以policy loss就得要借助優勢函數的幫忙來決定調整的方向.
     #
     #      優勢函數 (Advantage) = 真實累計得分 - 預期累計得分, 即
@@ -236,6 +238,21 @@ class PPOAgent:
         # is_terminal 是一個布林值，表示該步是否結束了這一局。
         # 當 is_terminal 為 True 時，表示這一步是該局的最後一步，後續的回報不應該再累積之前的獎勵，
         # 因此 discounted_reward 被重置為 0。
+        #
+        # 在強化學習中，我們通常會對未來的獎勵進行「打折」（discounting），這就是為什麼我們在計算回報時會使用 gamma 這個折扣因子。
+        # 之所以不直接加總而要「打折」的原因: 數學收斂性、人類直覺、以及對抗風險。
+        #
+        #   數學上的必要性：防止「無窮大」. 
+        #     如果這局永遠不結束且不打折：總回報會變成無限大, 就無法比較 動作A與動作B 哪個更好.
+        #     加上折扣後：總回報變成了一個等比級數：1 + gamma + gamma^2 + ...。只要 gamma < 1，這個級數就會收斂到一個確定的數值.
+        #
+        #   人類直覺：我們通常更關心「眼前的獎勵」，而不是「遙遠未來的獎勵」。打折反映了這種時間上的偏好。
+        #
+        #   對抗風險：未來的不確定性更高。打折可以讓模型更專注於那些更確定的獎勵，減少對未來不確定事件的過度依賴。
+        #
+        # gamma 越接近 1：代表 Agent 越「高瞻遠矚」，會為了長遠利益忍受短期的痛苦（例如：為了最後降落準一點，現在多花點燃料）。
+        # gamma 越接近 0：代表 Agent 越「短視近利」，只在乎下一秒能拿多少分。
+        # 在 LunarLander 中，我們通常設為 0.99。這代表我們希望 Agent 既要關注當下穩定，也要為了最後的成功著陸做長遠打算。
         for reward, is_terminal in zip(reversed(storage.rewards), reversed(storage.is_terminals)):
             if is_terminal:
                 discounted_reward = 0
@@ -247,23 +264,46 @@ class PPOAgent:
         
         # 轉換為 Tensor
         # torch.stack 是將列表中的 Tensor 沿著新的維度堆疊起來，形成一個新的 Tensor。
-        # 這裡的 storage.states, storage.actions, storage.logprobs, storage.values 都是列表，
-        # 每個元素都是一個 Tensor。
+        # 這裡的 storage.states, storage.actions, storage.logprobs, storage.values 都是列表，每個元素都是一個 Tensor。
         # detach() 是將 Tensor 從計算圖中分離出來，這樣在更新過程中就不會對這些 Tensor 進行梯度計算。
-        old_states = torch.stack(storage.states).detach()
-        old_actions = torch.stack(storage.actions).detach()
-        old_logprobs = torch.stack(storage.logprobs).detach()
+        old_states = torch.stack(storage.states).detach()               # 形狀: [batch_size, state_dim]
+        old_actions = torch.stack(storage.actions).detach()             # 形狀: [batch_size, action_dim]
+        old_logprobs = torch.stack(storage.logprobs).detach()           # 形狀: [batch_size]
         
         # 這裡的 old_values 是 舊的policy所"預測"的, "到終局的累計狀態價值 (V-value)"。
         # 注意 storage.values 是一個列表，每個元素都是一個形狀是 [1] 的 Tensor（因為 critic 輸出的是一個scaler）。
         # squeeze() 是將 Tensor 中的單維度（即大小為 1 的維度）去掉，這樣 old_values 就會變成一維的 Tensor。
-        old_values = torch.stack(storage.values).detach().squeeze()     
+        # 也可以用類似的操作像是.view(-1) 來將 Tensor 重新塑形為一維。
+        old_values = torch.stack(storage.values).detach().squeeze()     # 形狀: [batch_size]
+
+        # Side info : "-1" 在 reshape() in numpy 與 view() in PyTorch 都代表「自動計算該維度的長度」。
+        # reshape() in numpy:
+        #    ex. 最常見的用法，將多維矩陣拉直成一行。 (單純展平)
+        #        例如：如果你有一個形狀為 (2, 3) 的 Tensor，使用 reshape(-1) 就會得到一個形狀為 (6,) 的一維 Tensor。
+        #    ex. 自動計算行數：reshape(-1, n), 或者自動計算列數：reshape(n, -1)
+        #        例如：形狀為 (20,) 的 Tensor，使用 reshape(-1, 5) 或 reshape(4, -1) 就會得到一個形狀為 (4, 5) 的二維 Tensor。 
+        # view() in torch :
+        #    ex. x = torch.randn(2, 3, 4)  # 總共有 2*3*4 = 24 個元素
+        #        a = x.view(-1)            # 形狀變為 torch.Size([24])
+        #        b = x.view(6, -1)         # 形狀變為 torch.Size([6, 4])，因為 24/6 = 4
+        #        c = x.view(-1, 1)         # 形狀變為 torch.Size([24, 1])
+        #    view() 的使用限制
+        #        數據連續性：.view() 只能用於「連續的」（contiguous）張量。
+        #        如果張量經過 transpose() 或 permute() 等操作，必須先呼叫 .contiguous() 才能使用 .view()，否則會報錯。
         
         # 這裡的 target_values 是 PPO 更新過程中的「真實累計得分」(來自environment的reward, 不是policy預測出來的)，
-        target_values = torch.FloatTensor(rewards).to(self.device)      
+        target_values = torch.FloatTensor(rewards).to(self.device)      # 形狀: [batch_size]
         
         # 優勢函數 (Advantage). 優勢 (A) = 真實累計得分 - 預期累計得分。
-        advantages = target_values - old_values
+        advantages = target_values - old_values                         # 形狀: [batch_size]
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)   # normalize advantages
+
+        # 用來記錄這一輪 10 個 Epoch 的平均數值
+        sum_loss = 0
+        sum_policy_loss = 0
+        sum_value_loss = 0
+        sum_entropy = 0
+        sum_advantages = 0
 
         for _ in range(self.K_epochs):      # K_epochs 是每次 PPO 更新的迭代次數，通常是 10。
             # 在每次更新迭代中，使用正在訓練的 policy 網路 (self.policy) 計算當前狀態下的動作分佈 (mu, sigma) 
@@ -271,15 +311,15 @@ class PPOAgent:
             mu, sigma, values = self.policy(old_states)
             dist = Normal(mu, sigma)
             # 我們的動作有兩個維度(主引擎、側引擎). sum(dim=-1) 是把 log機率 加總起來，得到整個「決策」的總 log機率。 
-            logprobs = dist.log_prob(old_actions).sum(dim=-1)
+            logprobs = dist.log_prob(old_actions).sum(dim=-1)           # 形狀: [batch_size, action_dim] -> [batch_size]
             # 每個維度都有自己的 sigma，也就有自己的熵。把這兩個動作維度的不確定性加總起來，得到這整個「決策」的總不確定性。
-            dist_entropy = dist.entropy().sum(dim=-1)
+            dist_entropy = dist.entropy().sum(dim=-1)                   # 形狀: [batch_size, action_dim] -> [batch_size]
             
             # PPO 核心：計算 Ratio (pi_theta / pi_theta_old), 代表新policy對此action設定值的偏好程度"趨勢".
-            ratios = torch.exp(logprobs - old_logprobs)
+            ratios = torch.exp(logprobs - old_logprobs)                 # 形狀: [batch_size]
 
             # Clipped Surrogate Objective
-            surr1 = ratios * advantages
+            surr1 = ratios * advantages                                 # 形狀: [batch_size]
             surr2 = torch.clamp(ratios, 1-self.eps_clip, 1+self.eps_clip) * advantages
             # PPO 的損失函數包含：
             #   Policy Loss = -torch.min(surr1, surr2) ：加負號是因為我們要「最大化」優點。
@@ -288,17 +328,35 @@ class PPOAgent:
             # PPO的訓練目標: 
             #   Advantage 慢慢趨近於 0，但 Reward 卻很高.
             #   那就代表 Critic 已經變成了「預言家」，而 Actor 已經變成了「頂尖飛行員」。
-            loss = -torch.min(surr1, surr2) + 0.5 * self.mse_loss(values.squeeze(), target_values) - 0.01 * dist_entropy
-            
+            policy_loss = -torch.min(surr1, surr2).mean()                       # 這邊的mean是在batch維度上.
+            value_loss = 0.5 * self.mse_loss(values.squeeze(), target_values)   # MSELoss 會自動在batch維度上取 mean.
+            entropy_loss = -0.01 * dist_entropy.mean()                          # 這邊的mean是在batch維度上.
+            # 總損失 (取mean過的)
+            loss = policy_loss + value_loss + entropy_loss            
+
             self.optimizer.zero_grad()
-            loss.mean().backward()
+            loss.backward()
+            # 梯度裁剪 (Gradient Clipping) 是一種常用的技巧，用於防止梯度爆炸（Gradient Explosion）問題.
+            # 0.5 是裁剪的閾值，表示如果梯度的 L2 範數超過 0.5，就會被縮放回 0.5。
+            nn.utils.clip_grad_norm_(self.policy.parameters(), 0.5)     
             self.optimizer.step()
-            
+
+            # 累加數值
+            sum_loss += loss.item()
+            sum_policy_loss += policy_loss.item()
+            sum_value_loss += value_loss.item()
+            sum_entropy += dist_entropy.mean().item()           
+            sum_advantages += advantages.mean().item() 
+
         # 學習結束後，把新學好的權重同步給 policy_old，作為下一批收集資料時的參考基準。
         self.policy_old.load_state_dict(self.policy.state_dict())
         
         # 清空 Storage：PPO 是 On-Policy，舊資料學完就不能再用了（因為策略已經變了），必須清空重抓。
         storage.clear()
+
+        # 傳回平均loss.
+        return sum_loss/self.K_epochs, sum_policy_loss/self.K_epochs, \
+            sum_value_loss/self.K_epochs, sum_entropy/self.K_epochs, sum_advantages/self.K_epochs
 
 class Storage:
     def __init__(self):
@@ -325,6 +383,7 @@ agent = PPOAgent(state_dim, action_dim)
 storage = Storage()
 writer = SummaryWriter(f'runs/PPO_Lander_{datetime.datetime.now().strftime("%H%M%S")}')
 
+# 跑 1000局, 每局最多500步, 每累積2000步就更新一次 PPO 模型.
 timestep = 0
 for episode in range(1, MAX_EPISODES + 1):
     state, _ = env.reset()
@@ -343,10 +402,18 @@ for episode in range(1, MAX_EPISODES + 1):
         
         # 每累積 UPDATE_TIMESTEP (2000) 步就更新一次 PPO 模型。
         if timestep % UPDATE_TIMESTEP == 0:
-            agent.update(storage)
+            total_l, pol_l, val_l, ent, adv = agent.update(storage)
+
+            # 以 timestep 作為 X 軸，能精確對應訓練進度
+            writer.add_scalar('Loss/Total', total_l, timestep)
+            writer.add_scalar('Loss/Policy', pol_l, timestep)
+            writer.add_scalar('Loss/Value', val_l, timestep)
+            writer.add_scalar('Loss/Entropy', ent, timestep)            
+            writer.add_histogram('Train/Advantages', adv, timestep)
             
         if done: break
-        
+    
+    # 每局結束紀錄 reward.
     writer.add_scalar('Reward', episode_reward, episode)
     # 每 10 局輸出一次當前的獎勵，並且將模型權重保存到指定的檔案中。
     if episode % 10 == 0:
