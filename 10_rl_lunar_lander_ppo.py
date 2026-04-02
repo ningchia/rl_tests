@@ -93,7 +93,7 @@ import datetime
 
 ENV_NAME = "LunarLanderContinuous-v3"
 MAX_EPISODES = 1000
-UPDATE_TIMESTEP = 2000 # 每累積 2000 步更新一次
+UPDATE_TIMESTEP = 4000 # 每累積 4000 步更新一次
 
 MODEL_SAVE_PATH = "dqn_model"
 CHECKPOINT_FILE = "ppo_lunar_lander.pth"
@@ -101,7 +101,14 @@ CHECKPOINT_FILE = "ppo_lunar_lander.pth"
 os.makedirs(MODEL_SAVE_PATH, exist_ok=True)
 checkpoint_path = os.path.join(MODEL_SAVE_PATH, CHECKPOINT_FILE)
 
-# --- PPO 網路架構 ---
+
+# 實驗發現若是讓 Actor 與 Critic 共用同一個特徵提取層 (backbone), 會導致訓練過程中 Critic 的預測能力變得非常差, 
+# 以至於 Actor 的調整方向完全錯誤, 最終導致整個訓練過程崩潰.
+# Critic 的巨大loss (value_loss)造成梯度更新時淹沒 Actor 的loss (policy_loss) 梯度, 讓 Actor 的輸出變得非常不穩定, 
+# 以至於 Actor 的調整方向完全錯誤, 即使讓 value_loss的計算權重調小 0.5 -> 0.02, 也無法完全解決這個問題, 
+# 會發現 Sigma_Main被clamp在上限. 因此需要讓 Actor 與 Critic 使用完全獨立的特徵提取層 (backbone).
+'''
+# --- PPO 網路架構 (Actor-Critic 分享 backbone) ---
 class PPOModel(nn.Module):
     def __init__(self, state_dim, action_dim):
         super(PPOModel, self).__init__()
@@ -119,7 +126,7 @@ class PPOModel(nn.Module):
         # 第二維度 (Side Engines)：控制水平方向噴力。數值範圍：[-1, 1]。
         # 負數代表向右噴（推力向左），正數代表向左噴（推力向右）。
         self.actor_mu = nn.Linear(256, action_dim)      # head0: 輸出動作設定值的均值 (mu), 形狀: [batch_size, action_dim]
-        nn.init.constant_(self.actor_mu.bias, 0.5)      # 初始 bias 為 0.5 來強迫初期 mu 偏向正值（噴火）
+        # nn.init.constant_(self.actor_mu.bias, 0.5)      # 初始 bias 為 0.5 來強迫初期 mu 偏向正值（噴火）
 
         self.actor_sigma = nn.Linear(256, action_dim)   # head1: 輸出動作設定值的標準差 (sigma), 形狀: [batch_size, action_dim]
         
@@ -135,12 +142,49 @@ class PPOModel(nn.Module):
         # 以下這個做法發生過訓練過程中 sigma 為 NaN 的情況. 意思是某些權重在更新後變得NaN, 以至於 sigma 的輸出也變成NaN.
         # sigma = torch.exp(self.actor_sigma(x) - 0.5) + 1e-5  # 將head1的輸出(sigma) = e^(x - 0.5) 讓初始 sigma 大約在 e^-0.5, 0.6 左右
         
-        # 將 log_sigma 限制在合理範圍（例如 -20 到 2）
-        # 這能確保 sigma 永遠在 [exp(-20), exp(2)] 之間，不會是 0 也不會太大
-        log_sigma = torch.clamp(self.actor_sigma(x), -20, 2)
+        # 將 log_sigma 限制在 [exp(-2), exp(0)] -> [0.13, 1.0] 之間. 
+        # log_sigma的clamp上限太小也不好, 像是e^-0.5 = 0.6, 觀察到 reward 還是負的.
+        log_sigma = torch.clamp(self.actor_sigma(x), -2.0, 0)
         sigma = torch.exp(log_sigma)
 
         value = self.critic(x)
+
+        return mu, sigma, value
+'''
+# --- PPO 網路架構 (Actor-Critic 分離 backbone) ---
+class PPOModel(nn.Module):
+    def __init__(self, state_dim, action_dim):
+        super(PPOModel, self).__init__()
+        # --- Actor 網路：專門負責輸出動作分布 ---
+        self.actor_backbone = nn.Sequential(
+            nn.Linear(state_dim, 256),
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.ReLU()
+        )
+        self.mu_head = nn.Linear(256, action_dim)
+        self.sigma_head = nn.Linear(256, action_dim)
+
+        # --- Critic 網路：專門負責估計狀態價值 (Value) ---
+        self.critic_backbone = nn.Sequential(
+            nn.Linear(state_dim, 256),
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.ReLU(),
+            nn.Linear(256, 1) # 直接輸出 Value
+        )
+
+    def forward(self, state):
+        # 1. Actor 路徑
+        a_x = self.actor_backbone(state)
+        mu = torch.tanh(self.mu_head(a_x))
+        # 這裡建議繼續用你的 clamp 邏輯或 softplus
+        log_sigma = torch.clamp(self.sigma_head(a_x), -2.0, 0) 
+        sigma = torch.exp(log_sigma)
+
+        # 2. Critic 路徑 (完全獨立於 Actor 的特徵提取)
+        value = self.critic_backbone(state)
+
         return mu, sigma, value
 
 # --- PPO 核心演算法 ---
@@ -378,14 +422,25 @@ class PPOAgent:
                 surr2 = torch.clamp(ratios, 1-self.eps_clip, 1+self.eps_clip) * advantages[idx]
                 # PPO 的損失函數包含：
                 #   Policy Loss = -torch.min(surr1, surr2) ：加負號是因為我們要「最大化」優點。
-                #   Value Loss = 0.5 * MSELoss             ：這是 。訓練 Critic（評論家）讓它預測得分越來越準。
+                #   Value Loss = 0.5 * MSELoss             ：這是訓練 Critic（評論家）讓它預測得分越來越準。
                 #   混亂獎勵 = -0.01 * Entropy              ：獎勵那些 sigma 比較大的行為，防止 AI 太快變死板。
                 # PPO的訓練目標: 
                 #   Advantage 慢慢趨近於 0，但 Reward 卻很高.
                 #   那就代表 Critic 已經變成了「預言家」，而 Actor 已經變成了「頂尖飛行員」。
                 policy_loss = -torch.min(surr1, surr2).mean()                           # 這邊的mean是在batch維度上.
                 value_loss = 0.5 * self.mse_loss(values.squeeze(), target_values[idx])  # MSELoss 會自動在batch維度上取 mean.
-                entropy_loss = -0.01 * dist_entropy.mean()                              # 這邊的mean是在batch維度上.
+                
+                # 在entropy_loss 的權重為0.01 時雖然可以讓 Action_Main與Mu_Main絕大部分時間在正值, 但是 Sigma_Main卻卡在1. 
+                # 而當權重為0.001時 , 效果就像權重為0的狀況, Sigma_Main有降低的現象, 只是因為有混亂獎勵的原因有一個明顯的上升後再下降.
+                # 這才是我們想要的探索（Exploration）轉利用（Exploitation）」 過程：
+                # 上升期（探索）：一開始模型對環境不熟，Entropy Loss 權重發揮作用，強迫模型調高 sigma（增加隨機性）。
+                # 下降期（收斂）：隨著訓練進行，模型發現了能拿到高分的穩定策略（Advantage 訊號變強）。
+                # 當 Policy Loss 的引導力量大於 0.001 的 Entropy 壓力時，模型開始壓低 sigma，進入精確控制階段。
+                # 為什麼這樣比 0 權重好？權重為 0 時，模型完全依賴初始隨機性，一旦剛好抓到一個「還不錯」的策略（例如一直往左噴），
+                # 它可能就會迅速收斂，而錯失了找到「完美策略」的機會。0.001 提供了一個安全網，防止模型過早陷入局部最佳解（Local Optimum）。
+                entropy_loss = -0.001 * dist_entropy.mean()                             # 這邊的mean是在batch維度上.
+                #entropy_loss = 0 * dist_entropy.mean()                              # 這邊的mean是在batch維度上.
+
                 # 總損失 (取mean過的)
                 loss = policy_loss + value_loss + entropy_loss            
 
@@ -393,6 +448,7 @@ class PPOAgent:
                 loss.backward()
                 # 梯度裁剪 (Gradient Clipping) 是一種常用的技巧，用於防止梯度爆炸（Gradient Explosion）問題.
                 # 0.5 是裁剪的閾值，表示如果梯度的 L2 範數超過 0.5，就會被縮放回 0.5。
+                # self.policy.parameters() 是要被裁剪的參數集合，通常是模型的權重。
                 nn.utils.clip_grad_norm_(self.policy.parameters(), 0.5)     
                 self.optimizer.step()
 
@@ -434,7 +490,7 @@ agent = PPOAgent(state_dim, action_dim)
 storage = Storage()
 writer = SummaryWriter(f'runs/PPO_Lander_{datetime.datetime.now().strftime("%H%M%S")}')
 
-# 跑 1000局, 每局最多500步, 每累積2000步就更新一次 PPO 模型.
+# 跑 1000局, 每局最多500步, 每累積4000步就更新一次 PPO 模型.
 timestep = 0
 for episode in range(1, MAX_EPISODES + 1):
     state, _ = env.reset()
@@ -457,17 +513,32 @@ for episode in range(1, MAX_EPISODES + 1):
         # leg_right_contact : 右腳接觸地面
         x, height, vel_x, vel_y, angle, angular_velocity, leg_left_contact, leg_right_contact = state
 
-        # 獎勵塑造：如果你還在空中(垂直速度 vel_y < 0)，且你有在噴火，給一點點鼓勵
-        if vel_y < 0 and vel_y > -0.1 and action[0] > 0:
-            reward += 0.01
-        if vel_y > 0 and action[0] > 0:
-            reward -= 0.01
-        
-        storage.rewards.append(reward)
+        episode_reward += reward            # 先記錄實際得分，再進行獎勵塑造 (Reward Shaping)。
         storage.is_terminals.append(done)   # 記錄這一步是否結束了這一局，這對於計算回報 (Rewards-to-go) 非常重要。
-        episode_reward += reward
+
+        # -------------------------------------------------------------
+        # 獎勵塑造：
+        if vel_y < 0:
+            if vel_y > -0.5:
+                reward += 0.05*(1. + vel_y)
+            else:
+                reward -= 0.2*abs(vel_y)
+        if vel_y > 0 and action[0] > 0:
+            reward -= 0.01 * action[0]
+
+        dist_from_center = abs(x)
+        if height > 0:
+            reward -= dist_from_center * 0.001    # x range : -2.5 ... 2.5
+
+        # 一旦腳部接觸地面，我們應該強烈要求它靜止。
+        if leg_left_contact > 0 or leg_right_contact > 0:
+            if action[0] != 0 or action[1] != 0:
+                reward -= 0.02
+        # -------------------------------------------------------------
+
+        storage.rewards.append(reward)      # 要提供給訓練的是reward shaping後的獎勵
         
-        # 每累積 UPDATE_TIMESTEP (2000) 步就更新一次 PPO 模型。
+        # 每累積 UPDATE_TIMESTEP (4000) 步就更新一次 PPO 模型。
         if timestep % UPDATE_TIMESTEP == 0:
             total_l, pol_l, val_l, ent, adv = agent.update(storage, timestep)
 

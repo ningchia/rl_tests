@@ -6,17 +6,42 @@ from torch.distributions import Normal
 import torch.nn as nn
 import torch.nn.functional as F
 
+# --- PPO 網路架構 (Actor-Critic 分離 backbone) ---
 class PPOModel(nn.Module): # 必須與訓練時結構一致
     def __init__(self, state_dim, action_dim):
         super(PPOModel, self).__init__()
-        self.fc = nn.Sequential(nn.Linear(state_dim, 256), nn.ReLU(), nn.Linear(256, 256), nn.ReLU())
-        self.actor_mu = nn.Linear(256, action_dim)
-        self.actor_sigma = nn.Linear(256, action_dim)
-        self.critic = nn.Linear(256, 1)
-    def forward(self, state):
-        x = self.fc(state)
-        return torch.tanh(self.actor_mu(x)), F.softplus(self.actor_sigma(x)) + 1e-5, self.critic(x)
+        # --- Actor 網路：專門負責輸出動作分布 ---
+        self.actor_backbone = nn.Sequential(
+            nn.Linear(state_dim, 256),
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.ReLU()
+        )
+        self.mu_head = nn.Linear(256, action_dim)
+        self.sigma_head = nn.Linear(256, action_dim)
 
+        # --- Critic 網路：專門負責估計狀態價值 (Value) ---
+        self.critic_backbone = nn.Sequential(
+            nn.Linear(state_dim, 256),
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.ReLU(),
+            nn.Linear(256, 1) # 直接輸出 Value
+        )
+
+    def forward(self, state):
+        # 1. Actor 路徑
+        a_x = self.actor_backbone(state)
+        mu = torch.tanh(self.mu_head(a_x))
+        # 這裡建議繼續用你的 clamp 邏輯或 softplus
+        log_sigma = torch.clamp(self.sigma_head(a_x), -2.0, 0) 
+        sigma = torch.exp(log_sigma)
+
+        # 2. Critic 路徑 (完全獨立於 Actor 的特徵提取)
+        value = self.critic_backbone(state)
+
+        return mu, sigma, value
+    
 MODEL_SAVE_PATH = "dqn_model"
 CHECKPOINT_FILE = "ppo_lunar_lander.pth"
 checkpoint_path = os.path.join(MODEL_SAVE_PATH, CHECKPOINT_FILE)
