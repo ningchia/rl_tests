@@ -276,6 +276,11 @@ for episode in range(EPISODES):
             current_q = policy_net(s_batch).gather(1, a_batch)
             
             with torch.no_grad():
+                # 因為 next_q, target_q 都是loss計算的一部分, 然而他們來自 target_net, 我們希望他們在每幾個
+                # episode 的, "對 policy_net"的訓練期間, 能維持不變, 所以要將他們從計算圖中移除, 
+                # 以免在進行loss.backward()時, target_net的權重也被更新了. 
+                # 這樣一來, target_net 就能在幾個 episode 內保持穩定, 提供一個穩定的學習目標給 policy_net.
+                # 訓練一陣子之後, 才一次性將policy_net的權重同步給target_net.
                 if not USE_DDQN:
                     # 這邊還是使用 DQN 的 target 計算方式 (由target net直接預測下一個狀態可能拿到的最大Q值)，
                     # 而非像 DDQN 那樣先由 policy net 選下一個狀態可能最高Q值的動作, 再由 target net 評估該動作的可能評分。

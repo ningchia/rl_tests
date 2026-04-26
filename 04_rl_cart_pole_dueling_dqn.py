@@ -233,6 +233,11 @@ for episode in range(EPISODES):
             # 計算目標 Q 值 (使用 Target Network 讓訓練更穩定)
             with torch.no_grad():
                 # 尋找下一個狀態的最大 Q 值：一樣用推論模式不計算梯度.
+                # 因為 next_q, target_q 都是loss計算的一部分, 然而他們來自 target_net, 我們希望他們在每幾個
+                # episode 的, "對 policy_net"的訓練期間, 能維持不變, 所以要將他們從計算圖中移除, 
+                # 以免在進行loss.backward()時, target_net的權重也被更新了. 
+                # 這樣一來, target_net 就能在幾個 episode 內保持穩定, 提供一個穩定的學習目標給 policy_net.
+                # 訓練一陣子之後, 才一次性將policy_net的權重同步給target_net.
                 if not USE_DDQN:
                     # --- Option-1 : DQN, 由 target_net 選擇並評估下一個動作的價值, 可能有過度估計 (Overestimation) 的問題 -----------
                     # 這是 DQN 的核心思想：使用當前的網路來選擇動作，但使用目標網路來評估下一個動作與其價值，這樣可以減少訓練過程中的震盪。

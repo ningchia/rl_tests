@@ -242,6 +242,11 @@ class SACAgent:
         d = torch.FloatTensor(d).unsqueeze(1).to(self.device)
 
         # 計算target Q 時通知 torch 這段計算不須列入計算圖, 因為critic_target只是被用來預測要給critic訓練的目標.
+        # 因為 q1_t, q2_t, target_q 是loss計算的一部分, 然而它們來自 critic_target, 我們希望它們在每幾個
+        # episode 的, "對 critic"的訓練期間, 能維持不變, 所以要將它們從計算圖中移除, 
+        # 以免在進行loss.backward()時, critic_target 的權重也被更新了. 
+        # 這樣一來, critic_target 就能在幾個 episode 內保持穩定, 提供一個穩定的學習目標給 pcritic.
+        # 訓練一陣子之後, 才"漸進式的(soft update, 低通濾波器似的)"將critic的權重同步給critic_target.
         with torch.no_grad():  
             # 用 重參數化技巧 選取一個動作並回傳 log-probability。
             #
