@@ -299,7 +299,7 @@ class PPOAgent:
     
     def update(self, storage, timestep):
         # 計算回報 (Rewards-to-go)
-        rewards = []
+        env_rewards_to_episode_end = []
         discounted_reward = 0
         # is_terminal 是一個布林值，表示該步是否結束了這一局。
         # 當 is_terminal 為 True 時，表示這一步是該局的最後一步，後續的回報不應該再累積之前的獎勵，
@@ -319,14 +319,14 @@ class PPOAgent:
         # gamma 越接近 1：代表 Agent 越「高瞻遠矚」，會為了長遠利益忍受短期的痛苦（例如：為了最後降落準一點，現在多花點燃料）。
         # gamma 越接近 0：代表 Agent 越「短視近利」，只在乎下一秒能拿多少分。
         # 在 LunarLander 中，我們通常設為 0.99。這代表我們希望 Agent 既要關注當下穩定，也要為了最後的成功著陸做長遠打算。
-        for reward, is_terminal in zip(reversed(storage.rewards), reversed(storage.is_terminals)):
+        for reward, is_terminal in zip(reversed(storage.rewards), reversed(storage.is_terminals)):  # 倒轉順序
             if is_terminal:
                 discounted_reward = 0
             # 這裡的 discounted_reward 是從最後一步開始往前累積的回報值。
             # 每一步的回報等於當前的 reward 加上之前累計回報的折扣值 (gamma * discounted_reward)。
             # 即在時間點 t 採取動作後，最終能拿到的累積總分是多少（即真實目標值）
             discounted_reward = reward + (self.gamma * discounted_reward)
-            rewards.insert(0, discounted_reward)
+            env_rewards_to_episode_end.insert(0, discounted_reward)         # 從前面insert來讓最後結果照正常順序.
         
         # --- 注意batch_size 匹配 ---
         # 注意 old_states, old_actions, old_logprobs, old_values, target_values, advantages 
@@ -335,7 +335,10 @@ class PPOAgent:
         # 轉換為 Tensor
         # torch.stack 是將列表中的 Tensor 沿著新的維度堆疊起來，形成一個新的 Tensor。
         # 這裡的 storage.states, storage.actions, storage.logprobs, storage.values 都是列表，每個元素都是一個 Tensor。
-        # detach() 是將 Tensor 從計算圖中分離出來，這樣在更新過程中就不會對這些 Tensor 進行梯度計算。
+        #
+        # 這些 old_* 變數代表了在蒐集資料階段，根據舊 policy 網路 (self.policy_old) 所採取的動作和預測的狀態價值等資料。
+        # 因為它們參與了損失函數的計算，但我們希望在更新 "新 policy 網路 (self.policy)" 的過程中，self.policy_old 的權重保持不變，
+        # 所以用 detach() 將它們從計算圖中拔除, 以免優化器根據loss進行backward propagation時也改到 self.policy_old 的權重。
         old_states = torch.stack(storage.states).detach()               # 形狀: [batch_size, state_dim]
         old_actions = torch.stack(storage.actions).detach()             # 形狀: [batch_size, action_dim]
         old_logprobs = torch.stack(storage.logprobs).detach()           # 形狀: [batch_size]
@@ -362,7 +365,7 @@ class PPOAgent:
         #        如果張量經過 transpose() 或 permute() 等操作，必須先呼叫 .contiguous() 才能使用 .view()，否則會報錯。
 
         # 這裡的 target_values 是 PPO 更新過程中的「真實累計得分」(來自environment的reward, 不是policy預測出來的)，
-        target_values = torch.FloatTensor(rewards).to(self.device)      # 形狀: [batch_size]
+        target_values = torch.FloatTensor(env_rewards_to_episode_end).to(self.device)      # 形狀: [batch_size]
         
         # 優勢函數 (Advantage). 優勢 (A) = 真實累計得分 - 預期累計得分。
         advantages = target_values - old_values                         # 形狀: [batch_size]
@@ -393,11 +396,12 @@ class PPOAgent:
                 # 注意這邊 mu, sigma, values, dist, logprob, dist_entropy, ratios, surr1, surr2, 
                 # policy_loss, value_loss, entropy_loss, loss 的 batch_size 都是 64.
 
-                # 只取一部分樣本更新，能讓梯度更具方向性
-                mu, sigma, values = self.policy(old_states[idx])    
-
                 # 在每次更新迭代中，使用正在訓練的 policy 網路 (self.policy) 計算當前狀態下的動作分佈 (mu, sigma) 
                 # 和狀態價值 (values)。
+
+                # 只取一部分樣本更新，能讓梯度更具方向性
+                mu, sigma, values = self.policy(old_states[idx])    # 形狀: [batch_size, action_dim], [batch_size, action_dim], [batch_size, 1]
+
                 # 注意這邊 dist 的 batch_size = 64.
                 dist = Normal(mu, sigma)
                 # 我們的動作有兩個維度(主引擎、側引擎). sum(dim=-1) 是把 log機率 加總起來，得到整個「決策」的總 log機率。 
@@ -406,7 +410,7 @@ class PPOAgent:
                 # 每個維度都有自己的 sigma，也就有自己的熵。把這兩個動作維度的不確定性加總起來，得到這整個「決策」的總不確定性。
                 dist_entropy = dist.entropy().sum(dim=-1)                   # 形狀: [batch_size, action_dim] -> [batch_size]
                 
-                # PPO 核心：計算 Ratio (pi_theta / pi_theta_old), 代表新policy對此action設定值的偏好程度"趨勢".
+                # PPO 核心：計算 Ratio (pi_theta / pi_theta_old), 代表新policy對此action設定值的偏好程度"趨勢"(對比 policy_old).
                 # 注意這邊不能直接用old_logprobs, 得用 old_logprobs[idx], batch_size 才會match = 64.
                 ratios = torch.exp(logprobs - old_logprobs[idx])            # 形狀: [batch_size]
 
@@ -418,6 +422,16 @@ class PPOAgent:
                     exit()
 
                 # Clipped Surrogate Objective
+                # 之所以叫做「Surrogate Objective」，是因為它是一個「代理目標函數」.
+                # 因為"選取動作設定值"是基於actor先輸出機率分布,再根據這個分布隨機選取動作設定值. 
+                # 這個隨機選取是無法求導的, 也因此loss的backward propagation時, 梯度無法直接影響到"actor如何選取動作設定值".
+                # 我們需要有一個loss是可以輾轉影響到 actor選取動作設定值的方式, 這就是 surrogate objective 的意義所在.
+                # 這裡的 ratio 代表同樣 "這個state, 這個action設定值", 新的(訓練中的) critic 相對於舊的 critic 的偏好程度趨勢.(是否更偏愛)
+                # advantage 代表同樣 "這個state, 這個action設定值", 真實環境提供的到終局的累計reward 是否比新的 critic 預測的好.
+                # 兩者相乘若是正數, 代表新actor對這個action設定值的偏好增加了, 而且這個action設定值的實際表現也比新的critic的預期好, 
+                # 是值得繼續增加偏好的(最大化). 所以單獨這項 loss (policy loss) 我們為其加上負號, 因為優化器希望最小化loss.
+                # 如此一來, 單就 policy_loss 的 backward propagation 就會修改到 actor 的權重, 讓它更偏愛這個action設定值.
+                # 當然 value_loss (MSE) 的 backward propagation 也會修改到 critic 的權重, 讓它對這個state的預測更準確.
                 surr1 = ratios * advantages[idx]                            # 形狀: [batch_size]
                 surr2 = torch.clamp(ratios, 1-self.eps_clip, 1+self.eps_clip) * advantages[idx]
                 # PPO 的損失函數包含：
